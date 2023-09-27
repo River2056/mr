@@ -13,9 +13,17 @@ import (
 )
 
 const (
-    OutputPath string = "output/"
-    Intermediate string = "intermediate/"
+	OutputPath   string = "output/"
+	Intermediate string = "intermediate/"
 )
+
+func prepareDirectories() {
+	// clear all output first
+	os.RemoveAll(OutputPath)
+	os.RemoveAll(Intermediate)
+	os.Mkdir(OutputPath, os.ModePerm)
+	os.Mkdir(Intermediate, os.ModePerm)
+}
 
 func main() {
 	mapf, reducef := loadPlugin()
@@ -23,90 +31,86 @@ func main() {
 
 	basePath, err := os.Getwd()
 	common.CheckError(err)
-    
-    // Map
-    mapValues := make(chan []model.KeyValue)
-    var wg sync.WaitGroup
-    for _, file := range inputs {
-        wg.Add(1)
-        filePath := fmt.Sprintf("%v/%v", basePath, file)
-        bytes, err := ioutil.ReadFile(filePath)
-        common.CheckError(err)
-        go func() {
-            defer wg.Done()
-            res := mapf(filePath, string(bytes))
-            mapValues <- res
-        }()
-    }
 
-    go func() {
-        wg.Wait()
-        close(mapValues)
-    }()
+	// Map
+	mapValues := make(chan []model.KeyValue)
+	var wg sync.WaitGroup
+	for _, file := range inputs {
+		wg.Add(1)
+		filePath := fmt.Sprintf("%v/%v", basePath, file)
+		bytes, err := ioutil.ReadFile(filePath)
+		common.CheckError(err)
+		go func() {
+			defer wg.Done()
+			res := mapf(filePath, string(bytes))
+			mapValues <- res
+		}()
+	}
 
-    // clear all output first
-    os.RemoveAll(OutputPath)
-    os.RemoveAll(Intermediate)
-    os.Mkdir(OutputPath, os.ModePerm)
-    os.Mkdir(Intermediate, os.ModePerm)
+	go func() {
+		wg.Wait()
+		close(mapValues)
+	}()
 
-    idx := 0
-    for value := range mapValues {
-        outputName := fmt.Sprintf("%v%v.map", Intermediate, idx)
-        outputValue := make([]string, 0)
-        for _, keyvalue := range value {
-            outputValue = append(outputValue, fmt.Sprintf("%v,%v", keyvalue.Key, keyvalue.Value))
-        }
-        
-        ioutil.WriteFile(outputName, []byte(strings.Join(outputValue, "\n")), os.ModePerm)
-        idx++
-    }
+	prepareDirectories()
 
-    // Reduce
-    reduceValues := make(chan string)
-    combine := make(map[string][]string)
-    filepath.Walk(Intermediate, func(path string, info os.FileInfo, err error) error {
-        if !info.IsDir() {
-            common.CheckError(err)
-            bytes, err := ioutil.ReadFile(path)
-            common.CheckError(err)
+	idx := 0
+	for value := range mapValues {
+		outputName := fmt.Sprintf("%v%v.map", Intermediate, idx)
+		outputValue := make([]string, 0)
+		for _, keyvalue := range value {
+			outputValue = append(outputValue, fmt.Sprintf("%v,%v", keyvalue.Key, keyvalue.Value))
+		}
 
-            content := string(bytes)
-            arr := strings.Split(content, "\n")
-            for _, row := range arr {
-                keyValueArr := strings.Split(row, ",")
-                var arrayInMap []string
-                if _, ok := combine[keyValueArr[0]]; !ok {
-                    arrayInMap = make([]string, 0)
-                } else {
-                    arrayInMap = combine[keyValueArr[0]]
-                }
-                arrayInMap = append(arrayInMap, keyValueArr[1])
-                combine[keyValueArr[0]] = arrayInMap
-            }
-        }
-        return nil
-    })
+		ioutil.WriteFile(outputName, []byte(strings.Join(outputValue, "\n")), os.ModePerm)
+		idx++
+	}
 
-    wg.Add(1)
-    go func() {
-        defer wg.Done()
-        for k, v := range combine {
-            reduceValues <- reducef(k, v)
-        }
-    }()
+	// Reduce
+	reduceValues := make(chan string)
+	combine := make(map[string][]string)
+	filepath.Walk(Intermediate, func(path string, info os.FileInfo, err error) error {
+		if !info.IsDir() {
+			common.CheckError(err)
+			bytes, err := ioutil.ReadFile(path)
+			common.CheckError(err)
 
-    go func() {
-        wg.Wait()
-        close(reduceValues)
-    }()
+			content := string(bytes)
+			arr := strings.Split(content, "\n")
+			for _, row := range arr {
+				keyValueArr := strings.Split(row, ",")
+				var arrayInMap []string
+				if _, ok := combine[keyValueArr[0]]; !ok {
+					arrayInMap = make([]string, 0)
+				} else {
+					arrayInMap = combine[keyValueArr[0]]
+				}
+				arrayInMap = append(arrayInMap, keyValueArr[1])
+				combine[keyValueArr[0]] = arrayInMap
+			}
+		}
+		return nil
+	})
 
-    result := make([]string, 0)
-    for v := range reduceValues {
-        result = append(result, v)
-    }
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for k, v := range combine {
+			reduceValues <- reducef(k, v)
+		}
+	}()
 
-    ioutil.WriteFile(fmt.Sprintf("%v%v", OutputPath, "reduce_output"), []byte(strings.Join(result, "\n")), os.ModePerm)
+	go func() {
+		wg.Wait()
+		close(reduceValues)
+	}()
+
+	result := make([]string, 0)
+	for v := range reduceValues {
+		result = append(result, v)
+	}
+
+	ioutil.WriteFile(fmt.Sprintf("%v%v", OutputPath, "reduce_output"), []byte(strings.Join(result, "\n")), os.ModePerm)
 }
 
 func loadPlugin() (func(string, string) []model.KeyValue, func(string, []string) string) {
